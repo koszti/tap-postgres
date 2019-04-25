@@ -27,10 +27,10 @@ def fetch_max_replication_key(conn_config, replication_key, schema_name, table_n
             return max_key
 
 
-def adjust_resplication_key(conn_info, replication_key_value):
+def get_min_db_in_progress_transaction(conn_info):
     with post_db.open_connection(conn_info) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name='stitch_cursor') as cur:
-                select_sql = """select least({}, txid_snapshot_xmin(txid_current_snapshot()))""".format(replication_key_value)
+                select_sql = """select txid_snapshot_xmin(txid_current_snapshot())"""
                 cur.execute(select_sql)
                 return cur.fetchone()[0]
 
@@ -63,8 +63,11 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
     replication_key_value = singer.get_bookmark(state, stream['tap_stream_id'], 'replication_key_value')
     replication_key_sql_datatype = md_map.get(('properties', replication_key)).get('sql-datatype')
 
+    min_in_progress_transaction = None
+
     if replication_key in RESERVED_REPLICATION_KEYS and replication_key_value:
-        replication_key_value = adjust_resplication_key(conn_info, replication_key_value)
+        min_in_progress_transaction = get_min_db_in_progress_transaction(conn_info)
+        replication_key_value = min(replication_key_value, min_in_progress_transaction)
 
     hstore_available = post_db.hstore_available(conn_info)
     with metrics.record_counter(None) as counter:
@@ -106,11 +109,14 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
 
                     #Picking a replication_key with NULL values will result in it ALWAYS been synced which is not great
                     #event worse would be allowing the NULL value to enter into the state
-                    if record_message.record[replication_key] is not None:
-                        state = singer.write_bookmark(state,
-                                                      stream['tap_stream_id'],
-                                                      'replication_key_value',
-                                                      record_message.record[replication_key])
+                    current_replication_key_value = record_message.record[replication_key]
+                    if current_replication_key_value is not None:
+                        if replication_key in RESERVED_REPLICATION_KEYS and \
+                                min_in_progress_transaction > current_replication_key_value:
+                            state = singer.write_bookmark(state,
+                                                          stream['tap_stream_id'],
+                                                          'replication_key_value',
+                                                          current_replication_key_value)
 
 
                     if rows_saved % UPDATE_BOOKMARK_PERIOD == 0:
