@@ -10,6 +10,8 @@ import tap_postgres.db as post_db
 
 LOGGER = singer.get_logger()
 
+RESERVED_REPLICATION_KEYS = ['__tx_id__']
+
 UPDATE_BOOKMARK_PERIOD = 1000
 
 def fetch_max_replication_key(conn_config, replication_key, schema_name, table_name):
@@ -23,6 +25,15 @@ def fetch_max_replication_key(conn_config, replication_key, schema_name, table_n
             max_key = cur.fetchone()[0]
             LOGGER.info("max replication key value: %s", max_key)
             return max_key
+
+
+def adjust_resplication_key(conn_info, replication_key_value):
+    with post_db.open_connection(conn_info) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name='stitch_cursor') as cur:
+                select_sql = """select least({}, txid_snapshot_xmin(txid_current_snapshot()))""".format(replication_key_value)
+                cur.execute(select_sql)
+                return cur.fetchone()[0]
+
 
 def sync_table(conn_info, stream, state, desired_columns, md_map):
     time_extracted = utils.now()
@@ -51,6 +62,9 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
     replication_key = md_map.get((), {}).get('replication-key')
     replication_key_value = singer.get_bookmark(state, stream['tap_stream_id'], 'replication_key_value')
     replication_key_sql_datatype = md_map.get(('properties', replication_key)).get('sql-datatype')
+
+    if replication_key in RESERVED_REPLICATION_KEYS and replication_key_value:
+        replication_key_value = adjust_resplication_key(conn_info, replication_key_value)
 
     hstore_available = post_db.hstore_available(conn_info)
     with metrics.record_counter(None) as counter:
