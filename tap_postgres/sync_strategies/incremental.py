@@ -111,8 +111,10 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                     #event worse would be allowing the NULL value to enter into the state
                     current_replication_key_value = record_message.record[replication_key]
                     if current_replication_key_value is not None:
-                        if replication_key in RESERVED_REPLICATION_KEYS and \
-                                min_in_progress_transaction > current_replication_key_value:
+                        if replication_key not in RESERVED_REPLICATION_KEYS or \
+                                (replication_key in RESERVED_REPLICATION_KEYS and
+                                 min_in_progress_transaction is not None and
+                                 min_in_progress_transaction > current_replication_key_value):
                             state = singer.write_bookmark(state,
                                                           stream['tap_stream_id'],
                                                           'replication_key_value',
